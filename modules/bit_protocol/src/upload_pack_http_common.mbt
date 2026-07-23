@@ -82,7 +82,7 @@ pub async fn discover_upload_refs_with_http(
 ) raise @bit.GitError {
   let adv = upload_pack_info_refs_with_http(remote, prefer_v2, http_get)
   let version = detect_protocol_version(adv)
-  if version == ProtocolVersion::V2 {
+  if version == V2 {
     let caps = parse_v2_advertised_caps(adv)
     let req = build_ls_refs_request("git/moonbit", [
       "refs/heads/", "refs/tags/", "HEAD",
@@ -127,6 +127,35 @@ pub async fn fetch_pack_with_http(
     Bytes,
   ) raise @bit.GitError,
 ) -> Bytes raise @bit.GitError {
+  fetch_pack_with_haves_with_http(
+    remote,
+    wants,
+    [],
+    prefer_v2,
+    depth,
+    filter,
+    http_get,
+    http_post,
+  )
+}
+
+///|
+/// Fetch a pack while advertising commits already present in the local
+/// repository. The returned pack may be thin and must be parsed with those
+/// local base objects.
+pub async fn fetch_pack_with_haves_with_http(
+  remote : String,
+  wants : Array[@bit.ObjectId],
+  haves : Array[@bit.ObjectId],
+  prefer_v2 : Bool,
+  depth : Int,
+  filter : FilterSpec,
+  http_get : async (String, Map[String, String]) -> (@bit.HttpResponse, Bytes) raise @bit.GitError,
+  http_post : async (String, Bytes, Map[String, String]) -> (
+    @bit.HttpResponse,
+    Bytes,
+  ) raise @bit.GitError,
+) -> Bytes raise @bit.GitError {
   let (refs, caps, version, _symrefs) = discover_upload_refs_with_http(
     remote, prefer_v2, http_get, http_post,
   )
@@ -141,11 +170,17 @@ pub async fn fetch_pack_with_http(
     wants
   }
   if version == ProtocolVersion::V2 {
-    let req = build_fetch_request_v2("git/moonbit", wants, depth, filter~)
+    let req = build_fetch_request_v2_with_haves(
+      "git/moonbit",
+      wants,
+      haves,
+      depth,
+      filter~,
+    )
     let resp = upload_pack_request_with_http(remote, req, true, http_post)
     return extract_pack_from_v2_response(resp)
   }
-  let req = build_fetch_request_v0("git/moonbit", wants, caps)
+  let req = build_fetch_request_v0_with_haves("git/moonbit", wants, haves, caps)
   let resp = upload_pack_request_with_http(remote, req, false, http_post)
   extract_pack_from_v0_response(resp)
 }

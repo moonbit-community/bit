@@ -49,6 +49,22 @@ let upload_pack_http_fetch_hex : String = "303030647061636b66696c650a30306435015
 let upload_pack_http_fixture_commit : String = "30c9f208acc7601773a29aef394157adf960d104"
 
 ///|
+test "upload-pack http: incremental requests advertise haves" {
+  let want = @bit.ObjectId::from_hex(upload_pack_http_fixture_commit)
+  let have = @bit.ObjectId::from_hex("1111111111111111111111111111111111111111")
+  let request = build_fetch_request_v2_with_haves(
+    "git/moonbit",
+    [want],
+    [have],
+    0,
+  )
+  let text = upload_pack_http_bytes_to_string(request)
+  assert_true(text.contains("want \{want.to_hex()}\n"))
+  assert_true(text.contains("have \{have.to_hex()}\n"))
+  assert_true(text.contains("done\n"))
+}
+
+///|
 async test "upload-pack http: info-refs accepts scp-style ssh remote" {
   let mut observed_url = ""
   let result = upload_pack_info_refs_with_http(

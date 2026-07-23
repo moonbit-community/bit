@@ -266,7 +266,21 @@ pub fn build_fetch_request_v2(
   agent : String,
   wants : Array[@bit.ObjectId],
   depth : Int,
-  filter? : FilterSpec = FilterSpec::NoFilter,
+  filter? : FilterSpec = NoFilter,
+) -> Bytes {
+  build_fetch_request_v2_with_haves(agent, wants, [], depth, filter~)
+}
+
+///|
+/// Build a protocol v2 fetch request that advertises locally available
+/// commits. Servers may use `haves` to send only objects missing from the
+/// local repository.
+pub fn build_fetch_request_v2_with_haves(
+  agent : String,
+  wants : Array[@bit.ObjectId],
+  haves : Array[@bit.ObjectId],
+  depth : Int,
+  filter? : FilterSpec = NoFilter,
 ) -> Bytes {
   let chunks : Array[Bytes] = []
   chunks.push(pktline_encode("command=fetch\n"))
@@ -286,6 +300,9 @@ pub fn build_fetch_request_v2(
   for want in wants {
     chunks.push(pktline_encode("want \{want.to_hex()}\n"))
   }
+  for have in haves {
+    chunks.push(pktline_encode("have \{have.to_hex()}\n"))
+  }
   chunks.push(pktline_encode("done\n"))
   chunks.push(pktline_flush())
   concat_bytes(chunks)
@@ -295,6 +312,18 @@ pub fn build_fetch_request_v2(
 pub fn build_fetch_request_v0(
   agent : String,
   wants : Array[@bit.ObjectId],
+  advertised : Array[String],
+) -> Bytes {
+  build_fetch_request_v0_with_haves(agent, wants, [], advertised)
+}
+
+///|
+/// Build a protocol v0 fetch request that advertises locally available
+/// commits.
+pub fn build_fetch_request_v0_with_haves(
+  agent : String,
+  wants : Array[@bit.ObjectId],
+  haves : Array[@bit.ObjectId],
   advertised : Array[String],
 ) -> Bytes {
   if wants.length() == 0 {
@@ -308,6 +337,9 @@ pub fn build_fetch_request_v0(
     chunks.push(pktline_encode("want \{wants[i].to_hex()}\n"))
   }
   chunks.push(pktline_flush())
+  for have in haves {
+    chunks.push(pktline_encode("have \{have.to_hex()}\n"))
+  }
   chunks.push(pktline_encode("done\n"))
   chunks.push(pktline_flush())
   concat_bytes(chunks)
