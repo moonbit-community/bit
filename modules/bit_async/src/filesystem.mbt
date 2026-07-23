@@ -11,7 +11,8 @@ pub(all) enum PathKind {
 /// Asynchronous filesystem seam for repository operations.
 ///
 /// Implementations must treat paths as UTF-8 host paths and return directory
-/// entry names rather than paths from `readdir`.
+/// entry names rather than paths from `readdir`. `mkdir_p` must succeed when
+/// the directory already exists.
 pub(open) trait AsyncFileSystem {
   async fn kind(Self, String) -> PathKind
   async fn read_file(Self, String) -> Bytes
