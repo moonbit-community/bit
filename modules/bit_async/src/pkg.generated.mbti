@@ -2,10 +2,13 @@
 package "mizchi/bit_async"
 
 import {
+  "mizchi/bit_object",
+  "mizchi/bit_types",
   "moonbitlang/core/debug",
 }
 
 // Values
+pub async fn pull_main_http(&AsyncFileSystem, String, String, async (String, Map[String, String]) -> (@bit_types.HttpResponse, Bytes) raise @bit_object.GitError, async (String, Bytes, Map[String, String]) -> (@bit_types.HttpResponse, Bytes) raise @bit_object.GitError) -> PullResult
 
 // Errors
 
@@ -14,6 +17,11 @@ pub(all) enum PathKind {
   Missing
   File
   Directory
+} derive(Eq, @debug.Debug)
+
+pub(all) enum PullResult {
+  Unchanged(@bit_object.ObjectId)
+  Updated(from~ : @bit_object.ObjectId, to~ : @bit_object.ObjectId)
 } derive(Eq, @debug.Debug)
 
 // Type aliases
@@ -28,4 +36,3 @@ pub(open) trait AsyncFileSystem {
   async fn remove_file(Self, String) -> Unit
   async fn remove_empty_dir(Self, String) -> Unit
 }
-

@@ -1,0 +1,17 @@
+import {
+  "mizchi/bit_core" @bit,
+  "mizchi/bit_io" @io,
+  "mizchi/bit_object" @object,
+  "mizchi/bit_pack" @pack,
+  "mizchi/bit_protocol" @protocol,
+  "mizchi/bit_repo" @repo,
+  "mizchi/bit_types" @types,
+  "moonbitlang/core/encoding/utf8",
+}
+
+import {
+  "moonbitlang/async",
+  "moonbitlang/core/test",
+} for "wbtest"
+
+supported_targets = "-all+native+wasm"
