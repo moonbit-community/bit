@@ -154,6 +154,21 @@ async fn verify_worktree_changes(
     let full_path = @bit.join_path(root, path)
     match (before.get(path), fs.kind(full_path)) {
       (None, Missing) => ()
+      (None, Directory) => {
+        let prefix = path + "/"
+        let mut tracked_directory = false
+        for old_path, _ in before {
+          if old_path.has_prefix(prefix) {
+            tracked_directory = true
+            break
+          }
+        }
+        if !tracked_directory {
+          raise @object.GitError::IoError(
+            "untracked path would be overwritten by pull: \{path}",
+          )
+        }
+      }
       (Some(_), Missing) =>
         raise @object.GitError::IoError(
           "local change would be overwritten by pull: \{path}",
@@ -181,18 +196,68 @@ async fn apply_worktree_changes(
 ) -> Unit {
   let changed = changed_worktree_paths(before, after)
   verify_worktree_changes(fs, root, before, changed)
-  for path in changed {
-    let full_path = @bit.join_path(root, path)
-    match after.get(path) {
-      None => if fs.kind(full_path) == File { fs.remove_file(full_path) }
-      Some(content) => {
-        if fs.kind(full_path) == Directory {
-          fs.remove_empty_dir(full_path)
+  try {
+    // Remove deleted paths first so file/directory transitions do not depend
+    // on lexicographic path order.
+    for path in changed {
+      if after.get(path) is None {
+        let full_path = @bit.join_path(root, path)
+        if fs.kind(full_path) == File {
+          fs.remove_file(full_path)
         }
-        fs.mkdir_p(pull_parent_dir(full_path))
-        fs.write_file(full_path, content)
       }
     }
+    for path in changed {
+      guard after.get(path) is Some(content) else { continue }
+      let full_path = @bit.join_path(root, path)
+      if fs.kind(full_path) == Directory {
+        fs.remove_empty_dir(full_path)
+      }
+      fs.mkdir_p(pull_parent_dir(full_path))
+      fs.write_file(full_path, content)
+    }
+  } catch {
+    error =>
+      try restore_worktree_changes(fs, root, before, changed) catch {
+        rollback_error =>
+          raise @object.GitError::IoError(
+            "pull failed: \{error}; restoring the worktree also failed: \{rollback_error}",
+          )
+      } noraise {
+        _ => raise error
+      }
+  } noraise {
+    _ => ()
+  }
+}
+
+///|
+async fn restore_worktree_changes(
+  fs : &AsyncFileSystem,
+  root : String,
+  before : Map[String, Bytes],
+  changed : Array[String],
+) -> Unit {
+  // Remove paths introduced by the new tree before restoring paths from the
+  // old tree. This also handles file/directory transitions.
+  for path in changed {
+    let full_path = @bit.join_path(root, path)
+    if before.get(path) is None {
+      match fs.kind(full_path) {
+        File => fs.remove_file(full_path)
+        Directory => fs.remove_empty_dir(full_path)
+        Missing => ()
+      }
+    }
+  }
+  for path in changed {
+    guard before.get(path) is Some(content) else { continue }
+    let full_path = @bit.join_path(root, path)
+    if fs.kind(full_path) == Directory {
+      fs.remove_empty_dir(full_path)
+    }
+    fs.mkdir_p(pull_parent_dir(full_path))
+    fs.write_file(full_path, content)
   }
 }
 
@@ -232,23 +297,84 @@ async fn write_repository_state(
   let id = pack_id(canonical_pack)
   let pack_dir = @bit.join_path(git_dir, "objects/pack")
   let base = "pack-\{id.to_hex()}"
-  fs.mkdir_p(pack_dir)
-  fs.write_file(@bit.join_path(pack_dir, base + ".pack"), canonical_pack)
-  fs.write_file(
-    @bit.join_path(pack_dir, base + ".idx"),
-    @pack.build_pack_index(canonical_pack),
-  )
-  fs.write_file(
-    @bit.join_path(git_dir, "index"),
-    checkout_index(store, commit, remote),
-  )
+  let pack_path = @bit.join_path(pack_dir, base + ".pack")
+  let pack_index_path = @bit.join_path(pack_dir, base + ".idx")
+  let index_path = @bit.join_path(git_dir, "index")
   let remote_ref = @bit.join_path(git_dir, "refs/remotes/origin/main")
-  fs.mkdir_p(pull_parent_dir(remote_ref))
-  fs.write_file(remote_ref, @utf8.encode("\{commit.to_hex()}\n"))
   let local_ref = @bit.join_path(git_dir, "refs/heads/main")
-  fs.mkdir_p(pull_parent_dir(local_ref))
-  // Update the checked-out ref last so interrupted pulls remain detectable.
-  fs.write_file(local_ref, @utf8.encode("\{commit.to_hex()}\n"))
+  let pack_existed = fs.kind(pack_path) == File
+  let pack_index_existed = fs.kind(pack_index_path) == File
+  let previous_index = if fs.kind(index_path) == File {
+    Some(fs.read_file(index_path))
+  } else {
+    None
+  }
+  let previous_remote_ref = if fs.kind(remote_ref) == File {
+    Some(fs.read_file(remote_ref))
+  } else {
+    None
+  }
+  let previous_local_ref = if fs.kind(local_ref) == File {
+    Some(fs.read_file(local_ref))
+  } else {
+    None
+  }
+  fs.mkdir_p(pack_dir)
+  try {
+    if !pack_existed {
+      fs.write_file(pack_path, canonical_pack)
+    }
+    if !pack_index_existed {
+      fs.write_file(pack_index_path, @pack.build_pack_index(canonical_pack))
+    }
+    fs.write_file(index_path, checkout_index(store, commit, remote))
+    fs.mkdir_p(pull_parent_dir(remote_ref))
+    fs.write_file(remote_ref, @utf8.encode("\{commit.to_hex()}\n"))
+    fs.mkdir_p(pull_parent_dir(local_ref))
+    // Update the checked-out ref last so interrupted pulls remain detectable.
+    fs.write_file(local_ref, @utf8.encode("\{commit.to_hex()}\n"))
+  } catch {
+    error =>
+      try {
+        restore_file(fs, index_path, previous_index)
+        restore_file(fs, remote_ref, previous_remote_ref)
+        if !pack_existed && fs.kind(pack_path) == File {
+          fs.remove_file(pack_path)
+        }
+        if !pack_index_existed && fs.kind(pack_index_path) == File {
+          fs.remove_file(pack_index_path)
+        }
+        // Restore the checked-out ref last.
+        restore_file(fs, local_ref, previous_local_ref)
+      } catch {
+        rollback_error =>
+          raise @object.GitError::IoError(
+            "pull failed: \{error}; restoring repository state also failed: \{rollback_error}",
+          )
+      } noraise {
+        _ => raise error
+      }
+  } noraise {
+    _ => ()
+  }
+}
+
+///|
+async fn restore_file(
+  fs : &AsyncFileSystem,
+  path : String,
+  previous : Bytes?,
+) -> Unit {
+  match previous {
+    None => if fs.kind(path) == File { fs.remove_file(path) }
+    Some(content) => {
+      if fs.kind(path) == Directory {
+        fs.remove_empty_dir(path)
+      }
+      fs.mkdir_p(pull_parent_dir(path))
+      fs.write_file(path, content)
+    }
+  }
 }
 
 ///|
@@ -311,6 +437,20 @@ pub async fn pull_main_http(
   let before = @repo.checkout_commit(store, current)
   let after = @repo.checkout_commit(store, target)
   apply_worktree_changes(fs, root, before, after)
-  write_repository_state(fs, root, remote, store, target, incoming)
+  try write_repository_state(fs, root, remote, store, target, incoming) catch {
+    error => {
+      let changed = changed_worktree_paths(before, after)
+      try restore_worktree_changes(fs, root, before, changed) catch {
+        rollback_error =>
+          raise @object.GitError::IoError(
+            "pull failed: \{error}; restoring the worktree also failed: \{rollback_error}",
+          )
+      } noraise {
+        _ => raise error
+      }
+    }
+  } noraise {
+    _ => ()
+  }
   Updated(from=current, to=target)
 }
