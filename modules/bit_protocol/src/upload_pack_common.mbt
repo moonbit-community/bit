@@ -281,6 +281,7 @@ pub fn build_fetch_request_v2_with_haves(
   haves : Array[@bit.ObjectId],
   depth : Int,
   filter? : FilterSpec = NoFilter,
+  shallows? : Array[@bit.ObjectId] = [],
 ) -> Bytes {
   let chunks : Array[Bytes] = []
   chunks.push(pktline_encode("command=fetch\n"))
@@ -290,6 +291,9 @@ pub fn build_fetch_request_v2_with_haves(
   chunks.push(pktline_encode("thin-pack\n"))
   chunks.push(pktline_encode("no-progress\n"))
   chunks.push(pktline_encode("ofs-delta\n"))
+  for shallow in shallows {
+    chunks.push(pktline_encode("shallow \{shallow.to_hex()}\n"))
+  }
   if depth > 0 {
     chunks.push(pktline_encode("deepen \{depth}\n"))
   }
@@ -325,6 +329,7 @@ pub fn build_fetch_request_v0_with_haves(
   wants : Array[@bit.ObjectId],
   haves : Array[@bit.ObjectId],
   advertised : Array[String],
+  shallows? : Array[@bit.ObjectId] = [],
 ) -> Bytes {
   if wants.length() == 0 {
     return pktline_flush()
@@ -335,6 +340,9 @@ pub fn build_fetch_request_v0_with_haves(
   chunks.push(pktline_encode(first))
   for i in 1..<wants.length() {
     chunks.push(pktline_encode("want \{wants[i].to_hex()}\n"))
+  }
+  for shallow in shallows {
+    chunks.push(pktline_encode("shallow \{shallow.to_hex()}\n"))
   }
   chunks.push(pktline_flush())
   for have in haves {

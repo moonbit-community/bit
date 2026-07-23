@@ -155,6 +155,7 @@ pub async fn fetch_pack_with_haves_with_http(
     @bit.HttpResponse,
     Bytes,
   ) raise @bit.GitError,
+  shallows? : Array[@bit.ObjectId] = [],
 ) -> Bytes raise @bit.GitError {
   let (refs, caps, version, _symrefs) = discover_upload_refs_with_http(
     remote, prefer_v2, http_get, http_post,
@@ -176,11 +177,18 @@ pub async fn fetch_pack_with_haves_with_http(
       haves,
       depth,
       filter~,
+      shallows~,
     )
     let resp = upload_pack_request_with_http(remote, req, true, http_post)
     return extract_pack_from_v2_response(resp)
   }
-  let req = build_fetch_request_v0_with_haves("git/moonbit", wants, haves, caps)
+  let req = build_fetch_request_v0_with_haves(
+    "git/moonbit",
+    wants,
+    haves,
+    caps,
+    shallows~,
+  )
   let resp = upload_pack_request_with_http(remote, req, false, http_post)
   extract_pack_from_v0_response(resp)
 }

@@ -52,16 +52,34 @@ let upload_pack_http_fixture_commit : String = "30c9f208acc7601773a29aef394157ad
 test "upload-pack http: incremental requests advertise haves" {
   let want = @bit.ObjectId::from_hex(upload_pack_http_fixture_commit)
   let have = @bit.ObjectId::from_hex("1111111111111111111111111111111111111111")
-  let request = build_fetch_request_v2_with_haves(
+  let shallow = @bit.ObjectId::from_hex(
+    "2222222222222222222222222222222222222222",
+  )
+  let v2_request = build_fetch_request_v2_with_haves(
     "git/moonbit",
     [want],
     [have],
     0,
+    shallows=[shallow],
   )
-  let text = upload_pack_http_bytes_to_string(request)
-  assert_true(text.contains("want \{want.to_hex()}\n"))
-  assert_true(text.contains("have \{have.to_hex()}\n"))
-  assert_true(text.contains("done\n"))
+  let v2_text = upload_pack_http_bytes_to_string(v2_request)
+  assert_true(v2_text.contains("want \{want.to_hex()}\n"))
+  assert_true(v2_text.contains("shallow \{shallow.to_hex()}\n"))
+  assert_true(v2_text.contains("have \{have.to_hex()}\n"))
+  assert_true(v2_text.contains("done\n"))
+
+  let v0_request = build_fetch_request_v0_with_haves(
+    "git/moonbit",
+    [want],
+    [have],
+    ["shallow"],
+    shallows=[shallow],
+  )
+  let v0_text = upload_pack_http_bytes_to_string(v0_request)
+  assert_true(v0_text.contains("want \{want.to_hex()} "))
+  assert_true(v0_text.contains("shallow \{shallow.to_hex()}\n"))
+  assert_true(v0_text.contains("have \{have.to_hex()}\n"))
+  assert_true(v0_text.contains("done\n"))
 }
 
 ///|
