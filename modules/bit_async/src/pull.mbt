@@ -20,6 +20,25 @@ async fn read_ref(fs : &AsyncFileSystem, path : String) -> @object.ObjectId? {
 }
 
 ///|
+async fn read_shallow_boundaries(
+  fs : &AsyncFileSystem,
+  git_dir : String,
+) -> Array[@object.ObjectId] {
+  let path = @bit.join_path(git_dir, "shallow")
+  if fs.kind(path) != File {
+    return []
+  }
+  let result : Array[@object.ObjectId] = []
+  for line in @utf8.decode_lossy(fs.read_file(path)[:]).split("\n") {
+    let value = line.trim().to_owned()
+    if !value.is_empty() {
+      result.push(@object.ObjectId::from_hex(value))
+    }
+  }
+  result
+}
+
+///|
 fn pull_parent_dir(path : String) -> String {
   match path.rev_find("/") {
     None => "."
@@ -270,6 +289,7 @@ pub async fn pull_main_http(
   if current == target {
     return Unchanged(current)
   }
+  let shallows = read_shallow_boundaries(fs, git_dir)
   let base_objects = load_pack_objects(fs, git_dir)
   let pack = @protocol.fetch_pack_with_http(
     remote,
@@ -280,6 +300,7 @@ pub async fn pull_main_http(
     http_get,
     http_post,
     haves=[current],
+    shallow=shallows,
   )
   let incoming = @pack.parse_packfile_with_bases(pack, base_objects)
   let store = @repo.ObjectStore::from_pack(base_objects)
