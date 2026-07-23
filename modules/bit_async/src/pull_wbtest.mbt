@@ -177,6 +177,7 @@ async test "async pull fetches and applies a fast-forward" {
   )
   let old_pack = @pack.create_packfile(old_objects)
   @pack.write_packfile_with_index(fs.inner, "/repo/.git", old_pack, old_objects)
+  fs.inner.write_string("/repo/.git/shallow", "\{old_commit_id.to_hex()}\n")
 
   let new_blob = b"new\n"
   let new_blob_id = @object.hash_object_content(Blob, new_blob)
@@ -205,6 +206,7 @@ async test "async pull fetches and applies a fast-forward" {
   ]
   let refs = pull_test_v2_refs(new_commit_id)
   let fetch = pull_test_v2_pack(@pack.create_packfile(new_objects))
+  let mut fetch_request = ""
   let result = pull_main_http(
     fs,
     "/repo",
@@ -229,6 +231,7 @@ async test "async pull fetches and applies a fast-forward" {
       let response = if @utf8.decode_lossy(body[:]).contains("command=ls-refs") {
         refs
       } else {
+        fetch_request = @utf8.decode_lossy(body[:])
         fetch
       }
       (@types.HttpResponse::new(200), response)
@@ -247,4 +250,6 @@ async test "async pull fetches and applies a fast-forward" {
     fs.inner.read_string("/repo/.git/refs/remotes/origin/main"),
     "\{new_commit_id.to_hex()}\n",
   )
+  assert_true(fetch_request.contains("shallow \{old_commit_id.to_hex()}\n"))
+  assert_true(fetch_request.contains("have \{old_commit_id.to_hex()}\n"))
 }
