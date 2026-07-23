@@ -1,11 +1,13 @@
 ///|
 struct MemoryFs {
   inner : @io.TestFs
+  mut fail_write : Int
+  mut writes : Int
 }
 
 ///|
 fn MemoryFs::new() -> MemoryFs {
-  { inner: @io.TestFs::new() }
+  { inner: @io.TestFs::new(), fail_write: 0, writes: 0 }
 }
 
 ///|
@@ -84,6 +86,10 @@ impl AsyncFileSystem for MemoryFs with fn mkdir_p(self, path) {
 
 ///|
 impl AsyncFileSystem for MemoryFs with fn write_file(self, path, content) {
+  self.writes += 1
+  if self.fail_write == self.writes {
+    raise @object.GitError::IoError("injected write failure")
+  }
   self.inner.write_file(path, content)
 }
 
@@ -136,6 +142,108 @@ async test "async pull rejects conflicting local changes" {
   } noraise {
     _ => fail("expected conflicting local change")
   }
+}
+
+///|
+async test "async pull restores the worktree after a write failure" {
+  let fs = MemoryFs::new()
+  fs.inner.mkdir_p("/repo")
+  fs.inner.write_string("/repo/a", "old a")
+  fs.inner.write_string("/repo/b", "old b")
+  fs.fail_write = 2
+  try
+    apply_worktree_changes(fs, "/repo", { "a": b"old a", "b": b"old b" }, {
+      "a": b"new a",
+      "b": b"new b",
+    })
+  catch {
+    @object.GitError::IoError(message) =>
+      @test.assert_eq(message, "injected write failure")
+    error => fail("unexpected error: \{error}")
+  } noraise {
+    _ => fail("expected injected write failure")
+  }
+  @test.assert_eq(fs.inner.read_file("/repo/a"), b"old a")
+  @test.assert_eq(fs.inner.read_file("/repo/b"), b"old b")
+}
+
+///|
+async test "async pull handles file and directory transitions" {
+  let fs = MemoryFs::new()
+  fs.inner.mkdir_p("/repo")
+  fs.inner.write_string("/repo/file-to-dir", "old")
+  fs.inner.write_string("/repo/dir-to-file/nested", "old")
+  apply_worktree_changes(
+    fs,
+    "/repo",
+    { "file-to-dir": b"old", "dir-to-file/nested": b"old" },
+    { "file-to-dir/nested": b"new", "dir-to-file": b"new" },
+  )
+  @test.assert_eq(fs.inner.read_file("/repo/file-to-dir/nested"), b"new")
+  @test.assert_eq(fs.inner.read_file("/repo/dir-to-file"), b"new")
+}
+
+///|
+async test "async pull restores repository state after a write failure" {
+  let blob = b"new\n"
+  let blob_id = @object.hash_object_content(Blob, blob)
+  let tree = @object.serialize_tree([
+    @object.TreeEntry::new("100644", "value.txt", blob_id),
+  ])
+  let tree_id = @object.hash_object_content(Tree, tree)
+  let commit = @object.serialize_commit_content(
+    @object.Commit::new(
+      tree_id,
+      [],
+      "Test <test@example.com>",
+      1000L,
+      "+0000",
+      "Test <test@example.com>",
+      1000L,
+      "+0000",
+      "new\n",
+    ),
+  )
+  let commit_id = @object.hash_object_content(Commit, commit)
+  let objects = [
+    @object.PackObject::new(Blob, blob),
+    @object.PackObject::new(Tree, tree),
+    @object.PackObject::new(Commit, commit),
+  ]
+  let fs = MemoryFs::new()
+  fs.inner.mkdir_p("/repo/.git/objects/pack")
+  fs.inner.write_string("/repo/.git/index", "old index")
+  fs.inner.write_string("/repo/.git/refs/remotes/origin/main", "old remote")
+  fs.inner.write_string("/repo/.git/refs/heads/main", "old local")
+  // Fail while updating the remote ref, after the new pack and index were
+  // written. The one-shot failure lets the rollback itself complete.
+  fs.fail_write = 4
+  try
+    write_repository_state(
+      fs,
+      "/repo",
+      "https://example.com/repo.git",
+      @repo.ObjectStore::from_pack(objects),
+      commit_id,
+      objects,
+    )
+  catch {
+    @object.GitError::IoError(message) =>
+      @test.assert_eq(message, "injected write failure")
+    error => fail("unexpected error: \{error}")
+  } noraise {
+    _ => fail("expected injected write failure")
+  }
+  @test.assert_eq(fs.inner.read_file("/repo/.git/index"), b"old index")
+  @test.assert_eq(
+    fs.inner.read_file("/repo/.git/refs/remotes/origin/main"),
+    b"old remote",
+  )
+  @test.assert_eq(
+    fs.inner.read_file("/repo/.git/refs/heads/main"),
+    b"old local",
+  )
+  @test.assert_eq(fs.inner.readdir("/repo/.git/objects/pack"), [])
 }
 
 ///|
