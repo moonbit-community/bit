@@ -97,6 +97,7 @@ is to keep extracting until every core package is its own module.
 | `mizchi/bit_diff_core`        | `modules/bit_diff_core/src`       | `gix-diff` (low-level)             |
 | `mizchi/bit_diff3`            | `modules/bit_diff3/src`           | `gix-merge` (low-level)            |
 | `mizchi/bit_apply`            | `modules/bit_apply/src`           | (patch application)                |
+| `mizchi/bit_async`            | `modules/bit_async/src`           | Asynchronous filesystem interface  |
 | `mizchi/bit_fast_import`      | `modules/bit_fast_import/src`     | (fast-import stream)               |
 | `mizchi/bit_osfs`             | `modules/bit_osfs/src`            | `gix-fs` (OS-backed impl)          |
 | `mizchi/bit_bootstrap`        | `modules/bit_bootstrap/src`       | (bootstrap helpers)                |

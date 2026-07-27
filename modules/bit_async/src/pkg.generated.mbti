@@ -1,0 +1,31 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "mizchi/bit_async"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+
+// Errors
+
+// Types and methods
+pub(all) enum PathKind {
+  Missing
+  File
+  Directory
+} derive(Eq, @debug.Debug)
+
+// Type aliases
+
+// Traits
+pub(open) trait AsyncFileSystem {
+  async fn kind(Self, String) -> PathKind
+  async fn read_file(Self, String) -> Bytes
+  async fn readdir(Self, String) -> Array[String]
+  async fn mkdir_p(Self, String) -> Unit
+  async fn write_file(Self, String, Bytes) -> Unit
+  async fn remove_file(Self, String) -> Unit
+  async fn remove_empty_dir(Self, String) -> Unit
+}
+

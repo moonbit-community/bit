@@ -20,6 +20,7 @@ const EXT_PREFIX = "mizchi/bitx_";
 const CORE_MODULES = new Set([
   "mizchi/bit_apply",
   "mizchi/bit_archive",
+  "mizchi/bit_async",
   "mizchi/bit_bootstrap",
   "mizchi/bit_config",
   "mizchi/bit_core",
