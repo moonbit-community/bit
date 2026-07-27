@@ -754,7 +754,7 @@ fn get_loose_by_hex(
         e => raise @bit.GitError::InvalidObject("Zlib error: \{e}")
       }
       check_loose_object_size(raw)
-      let obj = parse_loose_object(raw)
+      let obj = @object.parse_loose_object(raw)
       if !db.skip_verify {
         let verify_algo : @object.HashAlgorithm = if hex.length() == 64 {
           @object.HashAlgorithm::Sha256
@@ -991,7 +991,7 @@ fn get_by_hex(
         e => raise @bit.GitError::InvalidObject("Zlib error: \{e}")
       }
       check_loose_object_size(raw)
-      let obj = parse_loose_object(raw)
+      let obj = @object.parse_loose_object(raw)
       if !db.skip_verify {
         let verify_algo : @object.HashAlgorithm = if hex.length() == 64 {
           @object.HashAlgorithm::Sha256
@@ -1114,7 +1114,7 @@ fn load_loose_objects(
     let raw = @zlib.zlib_decompress(compressed, max_size=MAX_LOOSE_OBJECT_SIZE) catch {
       e => raise @bit.GitError::InvalidObject("Zlib error: \{e}")
     }
-    let obj = parse_loose_object(raw)
+    let obj = @object.parse_loose_object(raw)
     result.push(obj)
   }
   result
@@ -1463,64 +1463,6 @@ fn read_pack_object_at(
   obj
 }
 
-///|
-fn parse_loose_object(data : Bytes) -> @bit.PackObject raise @bit.GitError {
-  let len = data.length()
-  if len == 0 {
-    raise @bit.GitError::InvalidObject("Empty loose object")
-  }
-  let type_buf = StringBuilder::new()
-  let mut i = 0
-  while i < len && data[i] != b' ' {
-    type_buf.write_char(data[i].to_int().unsafe_to_char())
-    i += 1
-  }
-  if i >= len || data[i] != b' ' {
-    raise @bit.GitError::InvalidObject("Invalid loose object header")
-  }
-  i += 1
-  let mut size = 0
-  while i < len && data[i] != b'\x00' {
-    let b = data[i]
-    if b < b'0' || b > b'9' {
-      raise @bit.GitError::InvalidObject("Invalid loose object size")
-    }
-    size = size * 10 + (b.to_int() - b'0'.to_int())
-    i += 1
-  }
-  if i >= len || data[i] != b'\x00' {
-    raise @bit.GitError::InvalidObject("Invalid loose object header")
-  }
-  i += 1
-  let content_len = len - i
-  if content_len != size {
-    raise @bit.GitError::InvalidObject(
-      "Loose object size mismatch: expected=\{size}, got=\{content_len}",
-    )
-  }
-  let content = Bytes::from_array(
-    FixedArray::makei(content_len, j => data[i + j]),
-  )
-  let obj_type = object_type_from_string(type_buf.to_string())
-  @bit.PackObject::new(obj_type, content)
-}
-
-///|
-fn object_type_from_string(s : String) -> @bit.ObjectType raise @bit.GitError {
-  if s == "blob" {
-    @bit.ObjectType::Blob
-  } else if s == "tree" {
-    @bit.ObjectType::Tree
-  } else if s == "commit" {
-    @bit.ObjectType::Commit
-  } else if s == "tag" {
-    @bit.ObjectType::Tag
-  } else {
-    raise @bit.GitError::InvalidObject("Unknown object type: \{s}")
-  }
-}
-
-///|
 fn read_u32_be_at64(data : Bytes, start : Int) -> Int64 raise @bit.GitError {
   if start + 4 > data.length() {
     raise @bit.GitError::InvalidObject("Unexpected end of index data")

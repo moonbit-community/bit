@@ -130,6 +130,64 @@ pub fn create_object(
 }
 
 ///|
+/// Decode a zlib-compressed loose Git object.
+pub fn decode_loose_object(compressed : Bytes) -> PackObject raise GitError {
+  let raw = @zlib.zlib_decompress(compressed, max_size=0x7fff_ffff) catch {
+    error => raise GitError::InvalidObject("Zlib error: \{error}")
+  }
+  parse_loose_object(raw)
+}
+
+///|
+/// Parse an inflated loose Git object (`"<type> <size>\\0<content>"`).
+pub fn parse_loose_object(raw : Bytes) -> PackObject raise GitError {
+  if raw.length() == 0 {
+    raise GitError::InvalidObject("Empty loose object")
+  }
+  let type_name = StringBuilder::new()
+  let mut offset = 0
+  while offset < raw.length() && raw[offset] != b' ' {
+    type_name.write_char(raw[offset].to_int().unsafe_to_char())
+    offset += 1
+  }
+  if offset >= raw.length() {
+    raise GitError::InvalidObject("Invalid loose object header")
+  }
+  offset += 1
+  let mut size = 0
+  while offset < raw.length() && raw[offset] != b'\x00' {
+    let byte = raw[offset]
+    if byte < b'0' || byte > b'9' {
+      raise GitError::InvalidObject("Invalid loose object size")
+    }
+    size = size * 10 + (byte.to_int() - b'0'.to_int())
+    offset += 1
+  }
+  if offset >= raw.length() {
+    raise GitError::InvalidObject("Invalid loose object header")
+  }
+  offset += 1
+  if raw.length() - offset != size {
+    raise GitError::InvalidObject(
+      "Loose object size mismatch: expected=\{size}, got=\{raw.length() - offset}",
+    )
+  }
+  let obj_type = match type_name.to_string() {
+    "blob" => ObjectType::Blob
+    "tree" => ObjectType::Tree
+    "commit" => ObjectType::Commit
+    "tag" => ObjectType::Tag
+    name => raise GitError::InvalidObject("Unknown object type: \{name}")
+  }
+  PackObject::new(
+    obj_type,
+    Bytes::from_array(
+      FixedArray::makei(raw.length() - offset, i => raw[offset + i]),
+    ),
+  )
+}
+
+///|
 /// Hash object content (without compression) - optimized with incremental SHA1
 pub fn hash_object_content(obj_type : ObjectType, content : Bytes) -> ObjectId {
   hash_object_content_with_algo(Sha1, obj_type, content)

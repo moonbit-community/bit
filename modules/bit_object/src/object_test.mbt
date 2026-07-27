@@ -7,6 +7,15 @@ test "create blob hello" {
 }
 
 ///|
+test "decode loose object" {
+  let (id, compressed) = create_blob_string("hello\n")
+  let object = decode_loose_object(compressed)
+  assert_eq(object.obj_type, ObjectType::Blob)
+  assert_eq(object.id, id)
+  assert_eq(object.data, b"hello\n")
+}
+
+///|
 test "hash blob hello" {
   let id = hash_blob_string("hello\n")
   inspect(id.to_hex(), content="ce013625030ba8dba906f756967f9e9ca394464a")
