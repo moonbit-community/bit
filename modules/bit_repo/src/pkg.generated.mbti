@@ -9,9 +9,13 @@ import {
 // Values
 pub fn apply_shallow_updates(&@bit_types.FileSystem, &@bit_types.RepoFileSystem, String, Array[@bit_object.ObjectId], Array[@bit_object.ObjectId]) -> Unit raise @bit_object.GitError
 
+pub fn build_index_v2(ObjectStore, @bit_object.ObjectId) -> Bytes raise @bit_object.GitError
+
 pub fn checkout_commit(ObjectStore, @bit_object.ObjectId) -> Map[String, Bytes] raise @bit_object.GitError
 
 pub fn checkout_commit_to_fs(ObjectStore, @bit_object.ObjectId, &@bit_types.FileSystem, String, &@bit_types.RepoFileSystem) -> Unit raise @bit_object.GitError
+
+pub fn index_matches_commit(ObjectStore, @bit_object.ObjectId, Bytes) -> Bool raise @bit_object.GitError
 
 pub fn is_gitlink_mode(String) -> Bool
 

@@ -112,6 +112,36 @@ fn write_index_v2(
   let entries = collect_commit_entries(store, commit_id)
   // Git index entries must be in lexical path order.
   entries.sort_by((a, b) => String::lexical_compare(a.path, b.path))
+  let mtimes : Map[String, (Int, Int)] = Map([])
+  for entry in entries {
+    let full_path = join_path(root, entry.path)
+    mtimes[entry.path] = match @io.lstat_entry_meta(full_path) {
+      Some(meta) => meta.mtime()
+      None => (0, 0)
+    }
+  }
+  fs.write_file(join_path(git_dir, "index"), encode_index_v2(entries, mtimes))
+}
+
+///|
+/// Build a Git index v2 snapshot for `commit_id`.
+///
+/// Stat fields are zeroed because callers may materialize the index through a
+/// filesystem abstraction that does not expose host metadata.
+pub fn build_index_v2(
+  store : ObjectStore,
+  commit_id : @object.ObjectId,
+) -> Bytes raise @object.GitError {
+  let entries = collect_commit_entries(store, commit_id)
+  entries.sort_by((a, b) => String::lexical_compare(a.path, b.path))
+  encode_index_v2(entries, Map([]))
+}
+
+///|
+fn encode_index_v2(
+  entries : Array[IndexEntryInfo],
+  mtimes : Map[String, (Int, Int)],
+) -> Bytes {
   let out : Array[Byte] = []
   // Header: "DIRC" + version(2) + count
   out.push(b'D')
@@ -121,12 +151,7 @@ fn write_index_v2(
   push_u32_be(out, 2)
   push_u32_be(out, entries.length())
   for e in entries {
-    // Stat the file to get actual mtime
-    let full_path = join_path(root, e.path)
-    let (mtime_sec, mtime_nsec) = match @io.lstat_entry_meta(full_path) {
-      Some(meta) => meta.mtime()
-      None => (0, 0)
-    }
+    let (mtime_sec, mtime_nsec) = mtimes.get(e.path).unwrap_or((0, 0))
     // Git index v2 entry format (62 bytes fixed + variable name):
     // ctime_sec (4) + ctime_nsec (4)
     push_u32_be(out, mtime_sec)
@@ -175,8 +200,38 @@ fn write_index_v2(
   let index_bytes = Bytes::from_array(
     FixedArray::makei(out.length(), i => out[i]),
   )
-  let index_path = join_path(git_dir, "index")
-  fs.write_file(index_path, index_bytes)
+  index_bytes
+}
+
+///|
+/// Return whether an index snapshot represents exactly `commit_id`.
+///
+/// Stat data and optional index extensions are ignored. Conflict stages,
+/// paths, object IDs, and file modes are compared.
+pub fn index_matches_commit(
+  store : ObjectStore,
+  commit_id : @object.ObjectId,
+  index : Bytes,
+) -> Bool raise @object.GitError {
+  let expected = collect_commit_entries(store, commit_id)
+  expected.sort_by((a, b) => String::lexical_compare(a.path, b.path))
+  let actual = parse_index_snapshot(index, commit_id.hash_size())
+  actual.sort_by((a, b) => String::lexical_compare(a.path, b.path))
+  if actual.length() != expected.length() {
+    return false
+  }
+  for i in 0..<expected.length() {
+    let left = expected[i]
+    let right = actual[i]
+    if (right.flags & 0xf000) != 0 ||
+      right.extended_flags != 0 ||
+      left.path != right.path ||
+      left.id != right.id ||
+      left.mode != right.mode {
+      return false
+    }
+  }
+  true
 }
 
 ///|
@@ -185,6 +240,73 @@ priv struct IndexEntryInfo {
   id : @object.ObjectId
   size : Int
   mode : Int
+}
+
+///|
+priv struct IndexSnapshotEntry {
+  path : String
+  id : @object.ObjectId
+  mode : Int
+  flags : Int
+  extended_flags : Int
+}
+
+///|
+fn parse_index_snapshot(
+  index : Bytes,
+  hash_size : Int,
+) -> Array[IndexSnapshotEntry] raise @object.GitError {
+  if index.length() < 12 + hash_size ||
+    index[0] != b'D' ||
+    index[1] != b'I' ||
+    index[2] != b'R' ||
+    index[3] != b'C' {
+    raise @object.GitError::InvalidObject("Invalid index header")
+  }
+  let version = read_u32_be(index, 4)
+  if version != 2 && version != 3 {
+    raise @object.GitError::InvalidObject(
+      "Unsupported index version: \{version}",
+    )
+  }
+  let count = read_u32_be(index, 8)
+  let entries : Array[IndexSnapshotEntry] = Array::new(capacity=count)
+  let mut offset = 12
+  for _ in 0..<count {
+    let entry_start = offset
+    if offset + 40 + hash_size + 2 > index.length() - hash_size {
+      raise @object.GitError::InvalidObject("Index entry truncated")
+    }
+    let mode = read_u32_be(index, offset + 24)
+    let id = @object.ObjectId::from_bytes_at(index, offset + 40, hash_size~)
+    offset += 40 + hash_size
+    let flags = read_u16_be(index, offset)
+    offset += 2
+    let extended_flags = if (flags & 0x4000) != 0 {
+      if offset + 2 > index.length() - hash_size {
+        raise @object.GitError::InvalidObject("Index entry truncated")
+      }
+      let value = read_u16_be(index, offset)
+      offset += 2
+      value
+    } else {
+      0
+    }
+    let path_start = offset
+    while offset < index.length() - hash_size && index[offset] != b'\x00' {
+      offset += 1
+    }
+    if offset >= index.length() - hash_size {
+      raise @object.GitError::InvalidObject("Index path is not terminated")
+    }
+    let path = @utf8.decode_lossy(index[path_start:offset])
+    offset += 1
+    while (offset - entry_start) % 8 != 0 {
+      offset += 1
+    }
+    entries.push({ path, id, mode, flags, extended_flags })
+  }
+  entries
 }
 
 ///|
@@ -276,6 +398,19 @@ fn push_u32_be(out : Array[Byte], v : Int) -> Unit {
 fn push_u16_be(out : Array[Byte], v : Int) -> Unit {
   out.push(((v >> 8) & 0xff).to_byte())
   out.push((v & 0xff).to_byte())
+}
+
+///|
+fn read_u32_be(data : Bytes, offset : Int) -> Int {
+  (data[offset].to_int() << 24) |
+  (data[offset + 1].to_int() << 16) |
+  (data[offset + 2].to_int() << 8) |
+  data[offset + 3].to_int()
+}
+
+///|
+fn read_u16_be(data : Bytes, offset : Int) -> Int {
+  (data[offset].to_int() << 8) | data[offset + 1].to_int()
 }
 
 ///|

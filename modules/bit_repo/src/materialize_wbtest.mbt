@@ -31,6 +31,45 @@ test "write_index_v2 keeps lexical order for prefix-like paths" {
 }
 
 ///|
+test "index_matches_commit ignores stat data and rejects staged entries" {
+  let (store, commit_id) = build_commit_for_index_order_wbtest()
+  let index = build_index_v2(store, commit_id)
+  assert_true(index_matches_commit(store, commit_id, index))
+
+  let changed_stat = index.to_array()
+  changed_stat[12] = b'\x01'
+  assert_true(
+    index_matches_commit(
+      store,
+      commit_id,
+      Bytes::from_array(FixedArray::from_array(changed_stat)),
+    ),
+  )
+
+  let staged = index.to_array()
+  // The stage bits are the two high-order name flag bits. The first entry
+  // starts after the 12-byte header and uses a 20-byte SHA-1 object ID.
+  staged[12 + 40 + 20] = staged[12 + 40 + 20] | b'\x10'
+  assert_false(
+    index_matches_commit(
+      store,
+      commit_id,
+      Bytes::from_array(FixedArray::from_array(staged)),
+    ),
+  )
+
+  let assume_valid = index.to_array()
+  assume_valid[12 + 40 + 20] = assume_valid[12 + 40 + 20] | b'\x80'
+  assert_false(
+    index_matches_commit(
+      store,
+      commit_id,
+      Bytes::from_array(FixedArray::from_array(assume_valid)),
+    ),
+  )
+}
+
+///|
 fn build_commit_for_index_order_wbtest() -> (ObjectStore, @object.ObjectId) {
   let store = ObjectStore::new()
 
