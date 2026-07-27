@@ -39,6 +39,27 @@ async fn read_shallow_boundaries(
 }
 
 ///|
+fn update_shallow_boundaries(
+  current : Array[@object.ObjectId],
+  shallow : Array[@object.ObjectId],
+  unshallow : Array[@object.ObjectId],
+) -> Array[@object.ObjectId] {
+  let boundaries : Map[String, @object.ObjectId] = Map([])
+  for id in current {
+    boundaries[id.to_hex()] = id
+  }
+  for id in unshallow {
+    boundaries.remove(id.to_hex())
+  }
+  for id in shallow {
+    boundaries[id.to_hex()] = id
+  }
+  let result = [ for _, id in boundaries => id ]
+  result.sort_by((a, b) => String::compare(a.to_hex(), b.to_hex()))
+  result
+}
+
+///|
 fn pull_parent_dir(path : String) -> String {
   match path.rev_find("/") {
     None => "."
@@ -291,6 +312,7 @@ async fn write_repository_state(
   store : @repo.ObjectStore,
   commit : @object.ObjectId,
   objects : Array[@object.PackObject],
+  shallow_boundaries : Array[@object.ObjectId],
 ) -> Unit {
   let git_dir = @bit.join_path(root, ".git")
   let canonical_pack = @pack.create_packfile(objects)
@@ -300,6 +322,7 @@ async fn write_repository_state(
   let pack_path = @bit.join_path(pack_dir, base + ".pack")
   let pack_index_path = @bit.join_path(pack_dir, base + ".idx")
   let index_path = @bit.join_path(git_dir, "index")
+  let shallow_path = @bit.join_path(git_dir, "shallow")
   let remote_ref = @bit.join_path(git_dir, "refs/remotes/origin/main")
   let local_ref = @bit.join_path(git_dir, "refs/heads/main")
   let pack_existed = fs.kind(pack_path) == File
@@ -311,6 +334,11 @@ async fn write_repository_state(
   }
   let previous_remote_ref = if fs.kind(remote_ref) == File {
     Some(fs.read_file(remote_ref))
+  } else {
+    None
+  }
+  let previous_shallow = if fs.kind(shallow_path) == File {
+    Some(fs.read_file(shallow_path))
   } else {
     None
   }
@@ -328,6 +356,18 @@ async fn write_repository_state(
       fs.write_file(pack_index_path, @pack.build_pack_index(canonical_pack))
     }
     fs.write_file(index_path, checkout_index(store, commit, remote))
+    if shallow_boundaries.length() == 0 {
+      if fs.kind(shallow_path) == File {
+        fs.remove_file(shallow_path)
+      }
+    } else {
+      fs.write_file(
+        shallow_path,
+        @utf8.encode(
+          [ for id in shallow_boundaries => id.to_hex() ].join("\n") + "\n",
+        ),
+      )
+    }
     fs.mkdir_p(pull_parent_dir(remote_ref))
     fs.write_file(remote_ref, @utf8.encode("\{commit.to_hex()}\n"))
     fs.mkdir_p(pull_parent_dir(local_ref))
@@ -338,6 +378,7 @@ async fn write_repository_state(
       try {
         restore_file(fs, index_path, previous_index)
         restore_file(fs, remote_ref, previous_remote_ref)
+        restore_file(fs, shallow_path, previous_shallow)
         if !pack_existed && fs.kind(pack_path) == File {
           fs.remove_file(pack_path)
         }
@@ -417,7 +458,7 @@ pub async fn pull_main_http(
   }
   let shallows = read_shallow_boundaries(fs, git_dir)
   let base_objects = load_pack_objects(fs, git_dir)
-  let pack = @protocol.fetch_pack_with_http(
+  let fetch = @protocol.fetch_pack_with_http_result(
     remote,
     [target],
     true,
@@ -428,7 +469,7 @@ pub async fn pull_main_http(
     haves=[current],
     shallow=shallows,
   )
-  let incoming = @pack.parse_packfile_with_bases(pack, base_objects)
+  let incoming = @pack.parse_packfile_with_bases(fetch.pack, base_objects)
   let store = @repo.ObjectStore::from_pack(base_objects)
   store.add_objects(incoming)
   if !commit_is_ancestor(store, current, target) {
@@ -437,7 +478,16 @@ pub async fn pull_main_http(
   let before = @repo.checkout_commit(store, current)
   let after = @repo.checkout_commit(store, target)
   apply_worktree_changes(fs, root, before, after)
-  try write_repository_state(fs, root, remote, store, target, incoming) catch {
+  let shallow_boundaries = update_shallow_boundaries(
+    shallows,
+    fetch.shallow,
+    fetch.unshallow,
+  )
+  try
+    write_repository_state(
+      fs, root, remote, store, target, incoming, shallow_boundaries,
+    )
+  catch {
     error => {
       let changed = changed_worktree_paths(before, after)
       try restore_worktree_changes(fs, root, before, changed) catch {

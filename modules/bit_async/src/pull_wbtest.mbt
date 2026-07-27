@@ -44,18 +44,34 @@ fn pull_test_v2_refs(commit : @object.ObjectId) -> Bytes {
 }
 
 ///|
-fn pull_test_v2_pack(pack : Bytes) -> Bytes {
+fn pull_test_v2_pack(
+  pack : Bytes,
+  shallow? : Array[@object.ObjectId] = [],
+  unshallow? : Array[@object.ObjectId] = [],
+) -> Bytes {
   let sideband : Array[Byte] = [b'\x01']
   for byte in pack {
     sideband.push(byte)
   }
-  pull_test_concat([
+  let response : Array[Bytes] = []
+  if shallow.length() > 0 || unshallow.length() > 0 {
+    response.push(@protocol.pktline_encode("shallow-info\n"))
+    for id in shallow {
+      response.push(@protocol.pktline_encode("shallow \{id.to_hex()}\n"))
+    }
+    for id in unshallow {
+      response.push(@protocol.pktline_encode("unshallow \{id.to_hex()}\n"))
+    }
+    response.push(@protocol.pktline_delim())
+  }
+  response.append([
     @protocol.pktline_encode("packfile\n"),
     @protocol.pktline_encode_bytes(
       Bytes::from_array(FixedArray::makei(sideband.length(), i => sideband[i])),
     ),
     @protocol.pktline_flush(),
   ])
+  pull_test_concat(response)
 }
 
 ///|
@@ -213,11 +229,12 @@ async test "async pull restores repository state after a write failure" {
   let fs = MemoryFs::new()
   fs.inner.mkdir_p("/repo/.git/objects/pack")
   fs.inner.write_string("/repo/.git/index", "old index")
+  fs.inner.write_string("/repo/.git/shallow", "\{blob_id.to_hex()}\n")
   fs.inner.write_string("/repo/.git/refs/remotes/origin/main", "old remote")
   fs.inner.write_string("/repo/.git/refs/heads/main", "old local")
   // Fail while updating the remote ref, after the new pack and index were
   // written. The one-shot failure lets the rollback itself complete.
-  fs.fail_write = 4
+  fs.fail_write = 5
   try
     write_repository_state(
       fs,
@@ -226,6 +243,7 @@ async test "async pull restores repository state after a write failure" {
       @repo.ObjectStore::from_pack(objects),
       commit_id,
       objects,
+      [commit_id],
     )
   catch {
     @object.GitError::IoError(message) =>
@@ -235,6 +253,10 @@ async test "async pull restores repository state after a write failure" {
     _ => fail("expected injected write failure")
   }
   @test.assert_eq(fs.inner.read_file("/repo/.git/index"), b"old index")
+  @test.assert_eq(
+    fs.inner.read_string("/repo/.git/shallow"),
+    "\{blob_id.to_hex()}\n",
+  )
   @test.assert_eq(
     fs.inner.read_file("/repo/.git/refs/remotes/origin/main"),
     b"old remote",
@@ -314,7 +336,11 @@ async test "async pull fetches and applies a fast-forward" {
     @object.PackObject::new(Commit, new_commit),
   ]
   let refs = pull_test_v2_refs(new_commit_id)
-  let fetch = pull_test_v2_pack(@pack.create_packfile(new_objects))
+  let fetch = pull_test_v2_pack(
+    @pack.create_packfile(new_objects),
+    shallow=[new_commit_id],
+    unshallow=[old_commit_id],
+  )
   let mut fetch_request = ""
   let result = pull_main_http(
     fs,
@@ -357,6 +383,10 @@ async test "async pull fetches and applies a fast-forward" {
   )
   @test.assert_eq(
     fs.inner.read_string("/repo/.git/refs/remotes/origin/main"),
+    "\{new_commit_id.to_hex()}\n",
+  )
+  @test.assert_eq(
+    fs.inner.read_string("/repo/.git/shallow"),
     "\{new_commit_id.to_hex()}\n",
   )
   assert_true(fetch_request.contains("shallow \{old_commit_id.to_hex()}\n"))
