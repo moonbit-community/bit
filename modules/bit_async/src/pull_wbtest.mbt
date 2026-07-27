@@ -11,6 +11,20 @@ fn MemoryFs::new() -> MemoryFs {
 }
 
 ///|
+struct MemoryHttp {
+  refs : Bytes
+  fetch : Bytes
+  mut fetch_request : String
+  mut gets : Int
+  mut posts : Int
+}
+
+///|
+fn MemoryHttp::new(refs : Bytes, fetch : Bytes) -> MemoryHttp {
+  { refs, fetch, fetch_request: "", gets: 0, posts: 0 }
+}
+
+///|
 fn pull_test_concat(chunks : Array[Bytes]) -> Bytes {
   let result : Array[Byte] = []
   for chunk in chunks {
@@ -19,6 +33,24 @@ fn pull_test_concat(chunks : Array[Bytes]) -> Bytes {
     }
   }
   Bytes::from_array(FixedArray::makei(result.length(), i => result[i]))
+}
+
+///|
+fn pull_test_write_loose_objects(
+  fs : @io.TestFs,
+  git_dir : String,
+  objects : Array[@object.PackObject],
+) -> Unit {
+  for object in objects {
+    let (id, compressed) = @object.create_object(object.obj_type, object.data)
+    let hex = id.to_hex()
+    let directory = @bit.join_path(
+      @bit.join_path(git_dir, "objects"),
+      hex[:2].to_owned(),
+    )
+    fs.mkdir_p(directory)
+    fs.write_file(@bit.join_path(directory, hex[2:].to_owned()), compressed)
+  }
 }
 
 ///|
@@ -120,6 +152,24 @@ impl AsyncFileSystem for MemoryFs with fn remove_empty_dir(self, path) {
 }
 
 ///|
+impl AsyncHttpClient for MemoryHttp with fn get(self, _url, _headers) {
+  self.gets += 1
+  (@types.HttpResponse::new(200), pull_test_v2_advertisement())
+}
+
+///|
+impl AsyncHttpClient for MemoryHttp with fn post(self, _url, body, _headers) {
+  self.posts += 1
+  let response = if @utf8.decode_lossy(body[:]).contains("command=ls-refs") {
+    self.refs
+  } else {
+    self.fetch_request = @utf8.decode_lossy(body[:])
+    self.fetch
+  }
+  (@types.HttpResponse::new(200), response)
+}
+
+///|
 async test "async pull preserves untracked and unchanged modified files" {
   let fs = MemoryFs::new()
   fs.inner.mkdir_p("/repo")
@@ -133,7 +183,7 @@ async test "async pull preserves untracked and unchanged modified files" {
     "unchanged": b"upstream",
   }
   let after = { "changed": b"new", "added": b"hello", "unchanged": b"upstream" }
-  apply_worktree_changes(fs, "/repo", before, after)
+  ignore(apply_worktree_changes(fs, "/repo", before, after))
   @test.assert_eq(fs.inner.read_file("/repo/changed"), b"new")
   @test.assert_eq(fs.inner.read_file("/repo/added"), b"hello")
   @test.assert_eq(fs.inner.read_file("/repo/unchanged"), b"locally modified")
@@ -166,12 +216,15 @@ async test "async pull restores the worktree after a write failure" {
   fs.inner.mkdir_p("/repo")
   fs.inner.write_string("/repo/a", "old a")
   fs.inner.write_string("/repo/b", "old b")
-  fs.fail_write = 2
+  fs.inner.write_string("/repo/node", "old node")
+  fs.fail_write = 3
   try
-    apply_worktree_changes(fs, "/repo", { "a": b"old a", "b": b"old b" }, {
-      "a": b"new a",
-      "b": b"new b",
-    })
+    apply_worktree_changes(
+      fs,
+      "/repo",
+      { "a": b"old a", "b": b"old b", "node": b"old node" },
+      { "a": b"new a", "b": b"new b", "node/deep/child": b"new" },
+    )
   catch {
     @object.GitError::IoError(message) =>
       @test.assert_eq(message, "injected write failure")
@@ -181,6 +234,8 @@ async test "async pull restores the worktree after a write failure" {
   }
   @test.assert_eq(fs.inner.read_file("/repo/a"), b"old a")
   @test.assert_eq(fs.inner.read_file("/repo/b"), b"old b")
+  @test.assert_eq(fs.inner.read_file("/repo/node"), b"old node")
+  assert_false(fs.inner.is_dir("/repo/node/deep"))
 }
 
 ///|
@@ -189,11 +244,13 @@ async test "async pull handles file and directory transitions" {
   fs.inner.mkdir_p("/repo")
   fs.inner.write_string("/repo/file-to-dir", "old")
   fs.inner.write_string("/repo/dir-to-file/nested", "old")
-  apply_worktree_changes(
-    fs,
-    "/repo",
-    { "file-to-dir": b"old", "dir-to-file/nested": b"old" },
-    { "file-to-dir/nested": b"new", "dir-to-file": b"new" },
+  ignore(
+    apply_worktree_changes(
+      fs,
+      "/repo",
+      { "file-to-dir": b"old", "dir-to-file/nested": b"old" },
+      { "file-to-dir/nested": b"new", "dir-to-file": b"new" },
+    ),
   )
   @test.assert_eq(fs.inner.read_file("/repo/file-to-dir/nested"), b"new")
   @test.assert_eq(fs.inner.read_file("/repo/dir-to-file"), b"new")
@@ -239,7 +296,6 @@ async test "async pull restores repository state after a write failure" {
     write_repository_state(
       fs,
       "/repo",
-      "https://example.com/repo.git",
       @repo.ObjectStore::from_pack(objects),
       commit_id,
       objects,
@@ -306,8 +362,13 @@ async test "async pull fetches and applies a fast-forward" {
     "/repo",
     fs.inner,
   )
-  let old_pack = @pack.create_packfile(old_objects)
-  @pack.write_packfile_with_index(fs.inner, "/repo/.git", old_pack, old_objects)
+  fs.inner.write_string(
+    "/repo/.git/packed-refs",
+    "# pack-refs with: peeled fully-peeled sorted\n" +
+    "\{old_commit_id.to_hex()} refs/heads/main\n",
+  )
+  fs.inner.remove_file("/repo/.git/refs/heads/main")
+  pull_test_write_loose_objects(fs.inner, "/repo/.git", old_objects)
   fs.inner.write_string("/repo/.git/shallow", "\{old_commit_id.to_hex()}\n")
 
   let new_blob = b"new\n"
@@ -341,37 +402,103 @@ async test "async pull fetches and applies a fast-forward" {
     shallow=[new_commit_id],
     unshallow=[old_commit_id],
   )
-  let mut fetch_request = ""
-  let result = pull_main_http(
-    fs,
-    "/repo",
-    "https://example.com/repo.git",
-    async fn(
-      _url : String,
-      _headers : Map[String, String],
-    ) -> (@types.HttpResponse, Bytes) raise @object.GitError {
-      @async.sleep(0) catch {
-        error => raise @object.GitError::IoError(error.to_string())
-      }
-      (@types.HttpResponse::new(200), pull_test_v2_advertisement())
-    },
-    async fn(
-      _url : String,
-      body : Bytes,
-      _headers : Map[String, String],
-    ) -> (@types.HttpResponse, Bytes) raise @object.GitError {
-      @async.sleep(0) catch {
-        error => raise @object.GitError::IoError(error.to_string())
-      }
-      let response = if @utf8.decode_lossy(body[:]).contains("command=ls-refs") {
-        refs
-      } else {
-        fetch_request = @utf8.decode_lossy(body[:])
-        fetch
-      }
-      (@types.HttpResponse::new(200), response)
-    },
+
+  let original_index = fs.inner.read_file("/repo/.git/index")
+  let staged_index = original_index.to_array()
+  staged_index[12 + 40 + 20] = staged_index[12 + 40 + 20] | b'\x10'
+  fs.inner.write_file(
+    "/repo/.git/index",
+    Bytes::from_array(FixedArray::from_array(staged_index)),
   )
+  try
+    pull_main_http(
+      fs,
+      MemoryHttp::new(refs, fetch),
+      "/repo",
+      "https://example.com/repo.git",
+    )
+  catch {
+    @object.GitError::IoError(message) =>
+      @test.assert_eq(
+        message, "local index changes would be overwritten by pull",
+      )
+    error => fail("unexpected error: \{error}")
+  } noraise {
+    _ => fail("expected staged index conflict")
+  }
+  @test.assert_eq(fs.inner.read_file("/repo/value.txt"), old_blob)
+  assert_false(fs.inner.is_file("/repo/.git/refs/heads/main"))
+  fs.inner.write_file("/repo/.git/index", original_index)
+
+  let unrelated_commit = @object.serialize_commit_content(
+    @object.Commit::new(
+      new_tree_id,
+      [],
+      "Test <test@example.com>",
+      2000L,
+      "+0000",
+      "Test <test@example.com>",
+      2000L,
+      "+0000",
+      "unrelated\n",
+    ),
+  )
+  let unrelated_commit_id = @object.hash_object_content(
+    Commit,
+    unrelated_commit,
+  )
+  let unrelated_http = MemoryHttp::new(
+    pull_test_v2_refs(unrelated_commit_id),
+    pull_test_v2_pack(
+      @pack.create_packfile([
+        @object.PackObject::new(Blob, new_blob),
+        @object.PackObject::new(Tree, new_tree),
+        @object.PackObject::new(Commit, unrelated_commit),
+      ]),
+    ),
+  )
+  try
+    pull_main_http(fs, unrelated_http, "/repo", "https://example.com/repo.git")
+  catch {
+    @object.GitError::InvalidObject(message) =>
+      @test.assert_eq(message, "Non-fast-forward pull")
+    error => fail("unexpected error: \{error}")
+  } noraise {
+    _ => fail("expected non-fast-forward rejection")
+  }
+  @test.assert_eq(fs.inner.read_file("/repo/value.txt"), old_blob)
+  assert_false(fs.inner.is_file("/repo/.git/refs/heads/main"))
+
+  fs.fail_write = 6
+  try
+    pull_main_http(
+      fs,
+      MemoryHttp::new(refs, fetch),
+      "/repo",
+      "https://example.com/repo.git",
+    )
+  catch {
+    @object.GitError::IoError(message) =>
+      @test.assert_eq(message, "injected write failure")
+    error => fail("unexpected error: \{error}")
+  } noraise {
+    _ => fail("expected repository write failure")
+  }
+  @test.assert_eq(fs.inner.read_file("/repo/value.txt"), old_blob)
+  @test.assert_eq(fs.inner.read_file("/repo/.git/index"), original_index)
+  assert_false(fs.inner.is_file("/repo/.git/refs/heads/main"))
+  @test.assert_eq(
+    fs.inner.read_string("/repo/.git/shallow"),
+    "\{old_commit_id.to_hex()}\n",
+  )
+  assert_false(fs.inner.is_file("/repo/.git/refs/remotes/origin/main"))
+  assert_false(fs.inner.is_dir("/repo/.git/refs/remotes"))
+  @test.assert_eq(fs.inner.readdir("/repo/.git/objects/pack"), [])
+
+  fs.fail_write = 0
+  fs.writes = 0
+  let http = MemoryHttp::new(refs, fetch)
+  let result = pull_main_http(fs, http, "/repo", "https://example.com/repo.git")
   @test.assert_eq(
     result,
     PullResult::Updated(from=old_commit_id, to=new_commit_id),
@@ -389,6 +516,10 @@ async test "async pull fetches and applies a fast-forward" {
     fs.inner.read_string("/repo/.git/shallow"),
     "\{new_commit_id.to_hex()}\n",
   )
-  assert_true(fetch_request.contains("shallow \{old_commit_id.to_hex()}\n"))
-  assert_true(fetch_request.contains("have \{old_commit_id.to_hex()}\n"))
+  assert_true(
+    http.fetch_request.contains("shallow \{old_commit_id.to_hex()}\n"),
+  )
+  assert_true(http.fetch_request.contains("have \{old_commit_id.to_hex()}\n"))
+  @test.assert_eq(http.gets, 1)
+  @test.assert_eq(http.posts, 2)
 }

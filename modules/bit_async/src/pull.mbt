@@ -7,16 +7,30 @@ pub(all) enum PullResult {
 } derive(Eq, Debug)
 
 ///|
-async fn read_ref(fs : &AsyncFileSystem, path : String) -> @object.ObjectId? {
-  if fs.kind(path) != File {
-    return None
+async fn read_ref(
+  fs : &AsyncFileSystem,
+  git_dir : String,
+  refname : String,
+) -> @object.ObjectId? {
+  let loose_path = @bit.join_path(git_dir, refname)
+  if fs.kind(loose_path) == File {
+    let value = fs.read_file(loose_path)
+    return Some(
+      @object.ObjectId::from_hex(@utf8.decode_lossy(value[:]).trim().to_owned()),
+    ) catch {
+      _ => None
+    }
   }
-  let value = fs.read_file(path)
-  Some(
-    @object.ObjectId::from_hex(@utf8.decode_lossy(value[:]).trim().to_owned()),
-  ) catch {
-    _ => None
+  let packed_path = @bit.join_path(git_dir, "packed-refs")
+  if fs.kind(packed_path) == File {
+    let text = @utf8.decode_lossy(fs.read_file(packed_path)[:])
+    for entry in @refs.parse_packed_refs_text(text) {
+      if entry.refname == refname {
+        return Some(@object.ObjectId::from_hex(entry.oid)) catch { _ => None }
+      }
+    }
   }
+  None
 }
 
 ///|
@@ -31,40 +45,64 @@ async fn read_shallow_boundaries(
   let result : Array[@object.ObjectId] = []
   for line in @utf8.decode_lossy(fs.read_file(path)[:]).split("\n") {
     let value = line.trim().to_owned()
-    if !value.is_empty() {
-      result.push(@object.ObjectId::from_hex(value))
+    if value.length() != 40 {
+      continue
+    }
+    let id = @object.ObjectId::from_hex(value) catch { _ => continue }
+    result.push(id)
+  }
+  result
+}
+
+///|
+async fn missing_parent_directories(
+  fs : &AsyncFileSystem,
+  stop : String,
+  paths : Array[String],
+) -> Array[String] {
+  let missing : Map[String, Bool] = Map([])
+  for path in paths {
+    let mut directory = @repo.parent_dir(path)
+    for ;; {
+      if directory == stop {
+        break
+      }
+      if fs.kind(directory) == Missing {
+        missing[directory] = true
+      }
+      let parent = @repo.parent_dir(directory)
+      if parent == directory {
+        break
+      }
+      directory = parent
     }
   }
+  let result = [ for directory, _ in missing => directory ]
+  result.sort_by(fn(a, b) {
+    let depth = b.length().compare(a.length())
+    if depth == 0 {
+      String::compare(a, b)
+    } else {
+      depth
+    }
+  })
   result
 }
 
 ///|
-fn update_shallow_boundaries(
-  current : Array[@object.ObjectId],
-  shallow : Array[@object.ObjectId],
-  unshallow : Array[@object.ObjectId],
-) -> Array[@object.ObjectId] {
-  let boundaries : Map[String, @object.ObjectId] = Map([])
-  for id in current {
-    boundaries[id.to_hex()] = id
-  }
-  for id in unshallow {
-    boundaries.remove(id.to_hex())
-  }
-  for id in shallow {
-    boundaries[id.to_hex()] = id
-  }
-  let result = [ for _, id in boundaries => id ]
-  result.sort_by((a, b) => String::compare(a.to_hex(), b.to_hex()))
-  result
-}
-
-///|
-fn pull_parent_dir(path : String) -> String {
-  match path.rev_find("/") {
-    None => "."
-    Some(0) => "/"
-    Some(index) => path[:index].to_owned()
+async fn remove_created_directories(
+  fs : &AsyncFileSystem,
+  directories : Array[String],
+) -> Unit {
+  for directory in directories {
+    match fs.kind(directory) {
+      Directory => fs.remove_empty_dir(directory)
+      Missing => ()
+      File =>
+        raise @object.GitError::IoError(
+          "path created as a directory became a file during pull: \{directory}",
+        )
+    }
   }
 }
 
@@ -107,6 +145,43 @@ async fn load_pack_objects(
       )
     }
     remaining = deferred
+  }
+  objects
+}
+
+///|
+async fn load_loose_objects(
+  fs : &AsyncFileSystem,
+  git_dir : String,
+) -> Array[@object.PackObject] {
+  let objects_dir = @bit.join_path(git_dir, "objects")
+  if fs.kind(objects_dir) != Directory {
+    return []
+  }
+  let objects : Array[@object.PackObject] = []
+  for prefix in fs.readdir(objects_dir) {
+    if prefix.length() != 2 {
+      continue
+    }
+    let directory = @bit.join_path(objects_dir, prefix)
+    if fs.kind(directory) != Directory {
+      continue
+    }
+    for suffix in fs.readdir(directory) {
+      if suffix.length() != 38 {
+        continue
+      }
+      let path = @bit.join_path(directory, suffix)
+      if fs.kind(path) != File {
+        continue
+      }
+      let object = @object.decode_loose_object(fs.read_file(path))
+      let expected = prefix + suffix
+      if object.id.to_hex() != expected {
+        raise @object.GitError::HashMismatch(expected, object.id.to_hex())
+      }
+      objects.push(object)
+    }
   }
   objects
 }
@@ -214,9 +289,16 @@ async fn apply_worktree_changes(
   root : String,
   before : Map[String, Bytes],
   after : Map[String, Bytes],
-) -> Unit {
+) -> Array[String] {
   let changed = changed_worktree_paths(before, after)
   verify_worktree_changes(fs, root, before, changed)
+  let added_paths : Array[String] = []
+  for path in changed {
+    if after.get(path) is Some(_) {
+      added_paths.push(@bit.join_path(root, path))
+    }
+  }
+  let created_directories = missing_parent_directories(fs, root, added_paths)
   try {
     // Remove deleted paths first so file/directory transitions do not depend
     // on lexicographic path order.
@@ -234,12 +316,14 @@ async fn apply_worktree_changes(
       if fs.kind(full_path) == Directory {
         fs.remove_empty_dir(full_path)
       }
-      fs.mkdir_p(pull_parent_dir(full_path))
+      fs.mkdir_p(@repo.parent_dir(full_path))
       fs.write_file(full_path, content)
     }
   } catch {
     error =>
-      try restore_worktree_changes(fs, root, before, changed) catch {
+      try
+        restore_worktree_changes(fs, root, before, changed, created_directories)
+      catch {
         rollback_error =>
           raise @object.GitError::IoError(
             "pull failed: \{error}; restoring the worktree also failed: \{rollback_error}",
@@ -250,6 +334,7 @@ async fn apply_worktree_changes(
   } noraise {
     _ => ()
   }
+  created_directories
 }
 
 ///|
@@ -258,6 +343,7 @@ async fn restore_worktree_changes(
   root : String,
   before : Map[String, Bytes],
   changed : Array[String],
+  created_directories : Array[String],
 ) -> Unit {
   // Remove paths introduced by the new tree before restoring paths from the
   // old tree. This also handles file/directory transitions.
@@ -271,13 +357,14 @@ async fn restore_worktree_changes(
       }
     }
   }
+  remove_created_directories(fs, created_directories)
   for path in changed {
     guard before.get(path) is Some(content) else { continue }
     let full_path = @bit.join_path(root, path)
     if fs.kind(full_path) == Directory {
       fs.remove_empty_dir(full_path)
     }
-    fs.mkdir_p(pull_parent_dir(full_path))
+    fs.mkdir_p(@repo.parent_dir(full_path))
     fs.write_file(full_path, content)
   }
 }
@@ -292,23 +379,9 @@ fn pack_id(pack : Bytes) -> @object.ObjectId raise @object.GitError {
 }
 
 ///|
-fn checkout_index(
-  store : @repo.ObjectStore,
-  commit : @object.ObjectId,
-  remote : String,
-) -> Bytes raise @object.GitError {
-  let memory = @io.TestFs::new()
-  @repo.materialize_clone_to_fs(
-    store, commit, "refs/heads/main", remote, memory, "/repo", memory,
-  )
-  memory.read_file("/repo/.git/index")
-}
-
-///|
 async fn write_repository_state(
   fs : &AsyncFileSystem,
   root : String,
-  remote : String,
   store : @repo.ObjectStore,
   commit : @object.ObjectId,
   objects : Array[@object.PackObject],
@@ -347,15 +420,18 @@ async fn write_repository_state(
   } else {
     None
   }
-  fs.mkdir_p(pack_dir)
+  let created_directories = missing_parent_directories(fs, git_dir, [
+    pack_path, remote_ref, local_ref,
+  ])
   try {
+    fs.mkdir_p(pack_dir)
     if !pack_existed {
       fs.write_file(pack_path, canonical_pack)
     }
     if !pack_index_existed {
       fs.write_file(pack_index_path, @pack.build_pack_index(canonical_pack))
     }
-    fs.write_file(index_path, checkout_index(store, commit, remote))
+    fs.write_file(index_path, @repo.build_index_v2(store, commit))
     if shallow_boundaries.length() == 0 {
       if fs.kind(shallow_path) == File {
         fs.remove_file(shallow_path)
@@ -368,9 +444,9 @@ async fn write_repository_state(
         ),
       )
     }
-    fs.mkdir_p(pull_parent_dir(remote_ref))
+    fs.mkdir_p(@repo.parent_dir(remote_ref))
     fs.write_file(remote_ref, @utf8.encode("\{commit.to_hex()}\n"))
-    fs.mkdir_p(pull_parent_dir(local_ref))
+    fs.mkdir_p(@repo.parent_dir(local_ref))
     // Update the checked-out ref last so interrupted pulls remain detectable.
     fs.write_file(local_ref, @utf8.encode("\{commit.to_hex()}\n"))
   } catch {
@@ -387,6 +463,7 @@ async fn write_repository_state(
         }
         // Restore the checked-out ref last.
         restore_file(fs, local_ref, previous_local_ref)
+        remove_created_directories(fs, created_directories)
       } catch {
         rollback_error =>
           raise @object.GitError::IoError(
@@ -412,7 +489,7 @@ async fn restore_file(
       if fs.kind(path) == Directory {
         fs.remove_empty_dir(path)
       }
-      fs.mkdir_p(pull_parent_dir(path))
+      fs.mkdir_p(@repo.parent_dir(path))
       fs.write_file(path, content)
     }
   }
@@ -425,22 +502,30 @@ async fn restore_file(
 /// self-contained local pack.
 pub async fn pull_main_http(
   fs : &AsyncFileSystem,
+  http : &AsyncHttpClient,
   root : String,
   remote : String,
-  http_get : async (String, Map[String, String]) -> (@types.HttpResponse, Bytes) raise @object.GitError,
-  http_post : async (String, Bytes, Map[String, String]) -> (
-    @types.HttpResponse,
-    Bytes,
-  ) raise @object.GitError,
 ) -> PullResult {
+  let http_get = async fn(
+    url : String,
+    headers : Map[String, String],
+  ) -> (@types.HttpResponse, Bytes) raise @object.GitError {
+    http.get(url, headers)
+  }
+  let http_post = async fn(
+    url : String,
+    body : Bytes,
+    headers : Map[String, String],
+  ) -> (@types.HttpResponse, Bytes) raise @object.GitError {
+    http.post(url, body, headers)
+  }
   let git_dir = @bit.join_path(root, ".git")
-  let local_ref = @bit.join_path(git_dir, "refs/heads/main")
-  guard read_ref(fs, local_ref) is Some(current) else {
+  guard read_ref(fs, git_dir, "refs/heads/main") is Some(current) else {
     raise @object.GitError::IoError(
       "async pull requires an existing refs/heads/main checkout",
     )
   }
-  let (refs, _, _, symrefs) = @protocol.discover_upload_refs_with_http(
+  let (refs, capabilities, version, symrefs) = @protocol.discover_upload_refs_with_http(
     remote, true, http_get, http_post,
   )
   guard @protocol.select_default_ref(refs, symrefs) is Some((refname, target)) else {
@@ -458,17 +543,36 @@ pub async fn pull_main_http(
   }
   let shallows = read_shallow_boundaries(fs, git_dir)
   let base_objects = load_pack_objects(fs, git_dir)
-  let fetch = @protocol.fetch_pack_with_http_result(
+  base_objects.append(load_loose_objects(fs, git_dir))
+  let request = match version {
+    V2 =>
+      @protocol.build_fetch_request_v2(
+        "git/moonbit",
+        [target],
+        0,
+        filter=NoFilter,
+        haves=[current],
+        shallow=shallows,
+      )
+    V0 =>
+      @protocol.build_fetch_request_v0(
+        "git/moonbit",
+        [target],
+        capabilities,
+        haves=[current],
+        shallow=shallows,
+      )
+  }
+  let response = @protocol.upload_pack_request_with_http(
     remote,
-    [target],
-    true,
-    0,
-    NoFilter,
-    http_get,
+    request,
+    version == V2,
     http_post,
-    haves=[current],
-    shallow=shallows,
   )
+  let fetch = match version {
+    V2 => @protocol.parse_fetch_response_v2(response)
+    V0 => @protocol.parse_fetch_response_v0(response)
+  }
   let incoming = @pack.parse_packfile_with_bases(fetch.pack, base_objects)
   let store = @repo.ObjectStore::from_pack(base_objects)
   store.add_objects(incoming)
@@ -477,20 +581,29 @@ pub async fn pull_main_http(
   }
   let before = @repo.checkout_commit(store, current)
   let after = @repo.checkout_commit(store, target)
-  apply_worktree_changes(fs, root, before, after)
-  let shallow_boundaries = update_shallow_boundaries(
+  let index_path = @bit.join_path(git_dir, "index")
+  if fs.kind(index_path) != File ||
+    !@repo.index_matches_commit(store, current, fs.read_file(index_path)) {
+    raise @object.GitError::IoError(
+      "local index changes would be overwritten by pull",
+    )
+  }
+  let created_directories = apply_worktree_changes(fs, root, before, after)
+  let shallow_boundaries = @repo.update_shallow_boundaries(
     shallows,
     fetch.shallow,
     fetch.unshallow,
   )
   try
     write_repository_state(
-      fs, root, remote, store, target, incoming, shallow_boundaries,
+      fs, root, store, target, incoming, shallow_boundaries,
     )
   catch {
     error => {
       let changed = changed_worktree_paths(before, after)
-      try restore_worktree_changes(fs, root, before, changed) catch {
+      try
+        restore_worktree_changes(fs, root, before, changed, created_directories)
+      catch {
         rollback_error =>
           raise @object.GitError::IoError(
             "pull failed: \{error}; restoring the worktree also failed: \{rollback_error}",

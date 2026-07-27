@@ -8,6 +8,7 @@ import {
   "mizchi/bit_object@0.45.5",
   "mizchi/bit_pack@0.45.5",
   "mizchi/bit_protocol@0.45.5",
+  "mizchi/bit_refs@0.45.5",
   "mizchi/bit_repo@0.45.5",
   "mizchi/bit_types@0.45.5",
   "moonbitlang/async@0.20.2",
