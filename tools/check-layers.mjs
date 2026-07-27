@@ -20,7 +20,6 @@ const EXT_PREFIX = "mizchi/bitx_";
 const CORE_MODULES = new Set([
   "mizchi/bit_apply",
   "mizchi/bit_archive",
-  "mizchi/bit_async",
   "mizchi/bit_bootstrap",
   "mizchi/bit_config",
   "mizchi/bit_core",
@@ -43,6 +42,11 @@ const CORE_MODULES = new Set([
   "mizchi/bit_trailers",
   "mizchi/bit_types",
   "mizchi/bit_utils",
+]);
+
+// Standalone repository operations that depend only on core modules.
+const MID_MODULES = new Set([
+  "mizchi/bit_async",
 ]);
 
 // Standalone "high"-layer modules (carved out of mizchi/bit, still depend
@@ -126,10 +130,16 @@ function isHighModule(pkgPath) {
   return HIGH_MODULES.has(head);
 }
 
+function isMidModule(pkgPath) {
+  const head = pkgPath.split("/").slice(0, 2).join("/");
+  return MID_MODULES.has(head);
+}
+
 function isOurModule(pkgPath) {
   if (pkgPath === MODULE_PREFIX || pkgPath.startsWith(MODULE_PREFIX + "/")) return true;
   if (isExtModule(pkgPath)) return true;
   if (isCoreModule(pkgPath)) return true;
+  if (isMidModule(pkgPath)) return true;
   if (isHighModule(pkgPath)) return true;
   return false;
 }
@@ -140,6 +150,7 @@ function classify(pkgPath) {
   if (!isOurModule(pkgPath)) return null; // external
   if (isExtModule(pkgPath)) return "ext";
   if (isCoreModule(pkgPath)) return "core";
+  if (isMidModule(pkgPath)) return "mid";
   if (isHighModule(pkgPath)) return "high";
   const rel = pkgPath === MODULE_PREFIX ? "" : pkgPath.slice(MODULE_PREFIX.length + 1);
   const top = rel.split("/")[0];
@@ -153,7 +164,7 @@ function classify(pkgPath) {
 
 function topSegment(pkgPath) {
   if (!isOurModule(pkgPath)) return null;
-  if (isCoreModule(pkgPath) || isHighModule(pkgPath)) {
+  if (isCoreModule(pkgPath) || isMidModule(pkgPath) || isHighModule(pkgPath)) {
     return pkgPath.split("/").slice(0, 2).join("/");
   }
   if (isExtModule(pkgPath)) {
