@@ -1,0 +1,9 @@
+name = "mizchi/sha_bench"
+
+version = "0.1.0"
+
+import {
+  "mizchi/simd@0.4.1",
+}
+
+source = "cmd"
